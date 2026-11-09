@@ -16,6 +16,7 @@ import {
   requireAllowedEmails,
   workerName,
 } from "./alchemy.access.ts";
+import { r2State } from "./r2-state.ts";
 
 // Preview hostnames are `open-seo-<stage>.<WORKERS_SUBDOMAIN>` — the naming
 // lives in alchemy.access.ts, shared with the Access wildcard the security
@@ -167,6 +168,24 @@ const readCustomDomain = (prod: boolean) =>
       );
     }
     return domain;
+  });
+
+/**
+ * OPENSEO_DISABLE_WORKERS_DEV=1: serve the app worker only on its custom
+ * domain, with no workers.dev or preview URLs (the audit worker never has
+ * one). Needs CUSTOM_DOMAIN, or the app would have no URL at all.
+ */
+const readDisableWorkersDev = (prod: boolean, customDomain: string) =>
+  Effect.gen(function* () {
+    const disable = (yield* optionalVar("OPENSEO_DISABLE_WORKERS_DEV")) === "1";
+    if (disable && !prod && !customDomain) {
+      return yield* Effect.die(
+        new Error(
+          "OPENSEO_DISABLE_WORKERS_DEV=1 needs CUSTOM_DOMAIN, or the app has no URL.",
+        ),
+      );
+    }
+    return disable;
   });
 
 const optionalSecret = (name: string) =>
@@ -351,7 +370,15 @@ export default Alchemy.Stack(
     // Durable state in the Cloudflare state store (an `alchemy-state-store`
     // Worker on this account; one-time `pnpm alchemy cloudflare bootstrap`).
     // CI fetches its auth token from the account Secrets Store each run.
-    state: Cloudflare.state(),
+    // OPENSEO_STATE_STORE=r2 keeps state in a private, encrypted R2 object
+    // instead (no public state-store Worker) — see r2-state.ts. Read from
+    // process.env because this layer is built before --env-file applies.
+    state:
+      process.env.OPENSEO_STATE_STORE === "r2"
+        ? r2State()
+        : process.env.OPENSEO_STATE_STORE === "local"
+          ? Alchemy.localState()
+          : Cloudflare.state(),
   },
   Effect.gen(function* () {
     const stage = yield* Alchemy.Stage;
@@ -374,6 +401,7 @@ export default Alchemy.Stack(
     }
     const workersSubdomain = yield* readWorkersSubdomain({ required: false });
     const customDomain = yield* readCustomDomain(prod);
+    const disableWorkersDev = yield* readDisableWorkersDev(prod, customDomain);
 
     // Auth needs an absolute BETTER_AUTH_URL. Prod sets it explicitly;
     // previews always derive it from the deterministic worker name — a wrong
@@ -505,6 +533,7 @@ export default Alchemy.Stack(
 
     const app = yield* Cloudflare.Worker("open-seo", {
       name: workerName(stage),
+      url: !disableWorkersDev,
       // Prod serves the real domains; the zone is inferred from the hostname.
       domain: prod
         ? ["app.openseo.so", "www.app.openseo.so"]

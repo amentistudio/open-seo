@@ -1,0 +1,103 @@
+# Self-host deploy for the amentistudio fork: every push to main deploys
+# OpenSEO to seo.iamladi.dev (Cloudflare Access in front, workers.dev off).
+# Alchemy state lives encrypted in a private R2 bucket (deploy/alchemy/r2-state.ts).
+#
+# Secrets use an OPENSEO_ prefix on purpose: upstream workflows that stay in
+# this fork (deploy-website.yml, pr-preview.yml) read CLOUDFLARE_API_TOKEN and
+# must never pick up this account's token.
+name: Deploy self-host
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never run two deploys at once (the R2 state store has no lock); queue them.
+concurrency:
+  group: deploy-selfhost
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Upstream and other forks never run this.
+    if: github.repository == 'amentistudio/open-seo'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI: "1"
+      CLOUDFLARE_ACCOUNT_ID: 37edf9632ff45f367dc766793b82f7e8
+      CLOUDFLARE_API_TOKEN: ${{ secrets.OPENSEO_CLOUDFLARE_API_TOKEN }}
+      OPENSEO_STATE_STORE: r2
+      OPENSEO_STATE_BUCKET: open-seo-alchemy-state
+      ALCHEMY_STATE_PASSWORD: ${{ secrets.OPENSEO_ALCHEMY_STATE_PASSWORD }}
+      CUSTOM_DOMAIN: seo.iamladi.dev
+      VERIFY_WORKERS_SUBDOMAIN: ladi-37e.workers.dev
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check secrets are set
+        env:
+          DATAFORSEO_API_KEY: ${{ secrets.OPENSEO_DATAFORSEO_API_KEY }}
+        run: |
+          missing=0
+          for name in CLOUDFLARE_API_TOKEN ALCHEMY_STATE_PASSWORD DATAFORSEO_API_KEY; do
+            if [ -z "${!name}" ]; then echo "::error::Secret for $name is not set"; missing=1; fi
+          done
+          exit $missing
+
+      - name: Write .env.selfhost
+        env:
+          DATAFORSEO_API_KEY: ${{ secrets.OPENSEO_DATAFORSEO_API_KEY }}
+        run: |
+          umask 077
+          {
+            printf 'DATAFORSEO_API_KEY=%s\n' "$DATAFORSEO_API_KEY"
+            echo "AUTH_MODE=cloudflare_access"
+            echo "TEAM_DOMAIN=https://cadcanet.cloudflareaccess.com"
+            echo "POLICY_AUD=d08f805feeca4fc1f04a95b01b3e30b54ac58a74b94c6715cf81ba151bdbd6f8"
+            echo "CUSTOM_DOMAIN=$CUSTOM_DOMAIN"
+            echo "OPENSEO_TELEMETRY_DISABLED=1"
+            echo "OPENSEO_DISABLE_WORKERS_DEV=1"
+          } > .env.selfhost
+
+      - name: Deploy
+        run: pnpm deploy:selfhost --yes
+
+      - name: Remove .env.selfhost
+        if: always()
+        run: rm -f .env.selfhost
+
+      # Fail the run loudly if the deploy ever left a public way in.
+      - name: Verify workers.dev is off and Access gates the domain
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts"
+          for script in open-seo-selfhost open-seo-selfhost-audit; do
+            result=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/$script/subdomain")
+            echo "$script: $(echo "$result" | jq -c '.result')"
+            echo "$result" | jq -e '.result.enabled == false and .result.previews_enabled == false' > /dev/null \
+              || { echo "::error::$script has workers.dev or preview URLs enabled"; exit 1; }
+            code=$(curl -s -o /dev/null -w '%{http_code}' "https://$script.$VERIFY_WORKERS_SUBDOMAIN/")
+            [ "$code" = "404" ] || { echo "::error::$script.$VERIFY_WORKERS_SUBDOMAIN answered HTTP $code"; exit 1; }
+          done
+          location=$(curl -s -o /dev/null -w '%{redirect_url}' "https://$CUSTOM_DOMAIN/")
+          case "$location" in
+            https://cadcanet.cloudflareaccess.com/*) echo "Access gate OK" ;;
+            *) echo "::error::https://$CUSTOM_DOMAIN/ did not redirect to Cloudflare Access"; exit 1 ;;
+          esac

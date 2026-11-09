@@ -20,12 +20,9 @@ concurrency:
 
 jobs:
   deploy:
-    # The public mirror must not deploy. Only main may use the production
-    # environment's credentials.
-    if: >-
-      (github.repository == 'bensenescu/open-seo' ||
-      github.repository == 'every-app/private-open-seo') &&
-      github.ref == 'refs/heads/main'
+    # Upstream only. Forks keep this file so syncs stay a small diff, and this
+    # condition keeps the job from deploying openseo.so into the fork account.
+    if: github.repository == 'every-app/open-seo'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:

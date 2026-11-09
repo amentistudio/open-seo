@@ -37,6 +37,9 @@ concurrency:
 jobs:
   release:
     name: everyapp release
+    # Upstream only. Forks keep this file so syncs stay a small diff, and this
+    # condition keeps the job from publishing releases from the fork.
+    if: github.repository == 'every-app/open-seo'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
