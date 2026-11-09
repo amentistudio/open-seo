@@ -64,10 +64,12 @@ jobs:
       - name: Write .env.selfhost
         env:
           DATAFORSEO_API_KEY: ${{ secrets.OPENSEO_DATAFORSEO_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENSEO_OPENROUTER_API_KEY }}
         run: |
           umask 077
           {
             printf 'DATAFORSEO_API_KEY=%s\n' "$DATAFORSEO_API_KEY"
+            if [ -n "$OPENROUTER_API_KEY" ]; then printf 'OPENROUTER_API_KEY=%s\n' "$OPENROUTER_API_KEY"; fi
             echo "AUTH_MODE=cloudflare_access"
             echo "TEAM_DOMAIN=https://cadcanet.cloudflareaccess.com"
             echo "POLICY_AUD=d08f805feeca4fc1f04a95b01b3e30b54ac58a74b94c6715cf81ba151bdbd6f8"
